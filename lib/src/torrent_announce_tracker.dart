@@ -2,16 +2,13 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:dtorrent_tracker/src/torrent_announce_events.dart';
 import 'package:dtorrent_tracker/src/tracker/peer_event.dart';
+import 'package:events_emitter2/events_emitter2.dart';
 
 import 'tracker/tracker.dart';
+import 'tracker/tracker_events.dart';
 import 'tracker_generator.dart';
-
-typedef AnnounceErrorHandler = void Function(Tracker t, dynamic error);
-
-typedef AnnounceOverHandler = void Function(Tracker t, int time);
-
-typedef PeerEventHandler = void Function(Tracker t, PeerEvent? event);
 
 /// Torrent announce tracker.
 ///
@@ -19,23 +16,13 @@ typedef PeerEventHandler = void Function(Tracker t, PeerEvent? event);
 /// trackers , and send track response event or track exception to client.
 ///
 ///
-class TorrentAnnounceTracker {
+class TorrentAnnounceTracker with EventsEmittable<TorrentAnnounceEvent> {
   final Map<Uri, Tracker> _trackers = {};
+  final Map<Tracker, EventsListener<TrackerEvent>> trackerEventListeners = {};
 
   TrackerGenerator? trackerGenerator;
 
   AnnounceOptionsProvider provider;
-
-  final Set<AnnounceErrorHandler> _announceErrorHandlers = {};
-
-  final Set<AnnounceOverHandler> _announceOverHandlers = {};
-
-  final Set<PeerEventHandler> _peerEventHandlers = {};
-
-  final Set<void Function(Tracker tracker, dynamic reason)>
-      _trackerDisposedHandlers = {};
-
-  final Set<void Function(Tracker tracker)> _announceStartHandlers = {};
 
   final Map<Tracker, List<dynamic>> _announceRetryTimers = {};
 
@@ -120,11 +107,8 @@ class TorrentAnnounceTracker {
 
   /// Close stream controller
   void _cleanup() {
+    events.dispose();
     _trackers.clear();
-    _peerEventHandlers.clear();
-    _announceOverHandlers.clear();
-    _announceErrorHandlers.clear();
-    _announceStartHandlers.clear();
     _announceRetryTimers.forEach((key, record) {
       record[0].cancel();
     });
@@ -151,7 +135,7 @@ class TorrentAnnounceTracker {
     if (tracker == null) {
       tracker = _createTracker(url, infoHash);
       if (tracker == null) return;
-      _hookTrakcer(tracker);
+      _hookTracker(tracker);
       _trackers[url] = tracker;
     }
     if (tracker.isDisposed) return;
@@ -188,131 +172,97 @@ class TorrentAnnounceTracker {
     return tracker != null;
   }
 
-  bool onAnnounceError(void Function(Tracker source, dynamic error) f) {
-    return _announceErrorHandlers.add(f);
-  }
-
-  bool offAnnounceError(void Function(Tracker source, dynamic error) f) {
-    return _announceErrorHandlers.remove(f);
-  }
-
-  bool onAnnounceOver(void Function(Tracker source, int time) f) {
-    return _announceOverHandlers.add(f);
-  }
-
-  bool offAnnounceOver(void Function(Tracker source, int time) f) {
-    return _announceOverHandlers.remove(f);
-  }
-
-  bool onPeerEvent(void Function(Tracker source, PeerEvent? event) f) {
-    return _peerEventHandlers.add(f);
-  }
-
-  bool offPeerEvent(void Function(Tracker source, PeerEvent event) f) {
-    return _peerEventHandlers.remove(f);
-  }
-
-  bool onTrackerDispose(void Function(Tracker source, dynamic reason) f) {
-    return _trackerDisposedHandlers.add(f);
-  }
-
-  bool offTrackerDispose(void Function(Tracker source, dynamic reason) f) {
-    return _trackerDisposedHandlers.remove(f);
-  }
-
-  bool onAnnounceStart(void Function(Tracker source) f) {
-    return _announceStartHandlers.add(f);
-  }
-
-  bool offAnnounceStart(void Function(Tracker source) f) {
-    return _announceStartHandlers.remove(f);
-  }
-
-  void _fireAnnounceError(Tracker tracker, dynamic error) {
+  void _fireAnnounceError(TrackerAnnounceErrorEvent event) {
     if (isDisposed) return;
-    var record = _announceRetryTimers.remove(tracker);
-    if (tracker.isDisposed) return;
+    var record = _announceRetryTimers.remove(event.source);
+    if (event.source.isDisposed) return;
     var times = 0;
     if (record != null) {
       (record[0] as Timer).cancel();
       times = record[1];
     }
     if (times >= maxRetryTime) {
-      tracker.dispose('NO MORE RETRY ($times/$maxRetryTime)');
+      event.source.dispose('NO MORE RETRY ($times/$maxRetryTime)');
       return;
     }
     var reTime = (_retryAfter * pow(2, times) as int);
     var timer = Timer(Duration(seconds: reTime), () {
-      if (tracker.isDisposed || isDisposed) return;
-      _unHookTracker(tracker);
-      var url = tracker.announceUrl;
-      var infoHash = tracker.infoHashBuffer;
+      if (event.source.isDisposed || isDisposed) return;
+      _unHookTracker(event.source);
+      var url = event.source.announceUrl;
+      var infoHash = event.source.infoHashBuffer;
       _trackers.remove(url);
-      tracker.dispose();
+      event.source.dispose();
       runTracker(url, infoHash);
     });
     times++;
-    _announceRetryTimers[tracker] = [timer, times];
-    for (var f in _announceErrorHandlers) {
-      Timer.run(() => f(tracker, error));
-    }
+    _announceRetryTimers[event.source] = [timer, times];
+    events.emit(AnnounceErrorEvent(event.source, event.error));
   }
 
-  void _fireAnnounceOver(Tracker tracker, int time) {
-    var record = _announceRetryTimers.remove(tracker);
+  void _fireAnnounceOver(TrackerAnnounceOverEvent event) {
+    var record = _announceRetryTimers.remove(event.source);
     if (record != null) {
       record[0].cancel();
     }
-    for (var f in _announceOverHandlers) {
-      Timer.run(() => f(tracker, time));
-    }
+    events.emit(AnnounceOverEvent(event.source, event.intervalTime));
   }
 
-  void _firePeerEvent(Tracker tracker, PeerEvent? event) {
-    var record = _announceRetryTimers.remove(tracker);
+  void _firePeerEvent(TrackerPeerEventEvent event) {
+    var record = _announceRetryTimers.remove(event.source);
     if (record != null) {
       record[0].cancel();
     }
-    for (var f in _peerEventHandlers) {
-      Timer.run(() => f(tracker, event));
-    }
+    events.emit(AnnouncePeerEventEvent(event.source, event.peerEvent));
   }
 
-  void _fireTrackerDisposed(Tracker tracker, dynamic reason) {
-    var record = _announceRetryTimers.remove(tracker);
+  void _fireTrackerComplete(TrackerCompleteEvent event) {
+    var record = _announceRetryTimers.remove(event.source);
     if (record != null) {
       record[0].cancel();
     }
-    _trackers.remove(tracker.announceUrl);
-    for (var f in _trackerDisposedHandlers) {
-      Timer.run(() => f(tracker, reason));
-    }
+    events.emit(AnnouncePeerEventEvent(event.source, event.peerEvent));
   }
 
-  void _fireAnnounceStart(Tracker tracker) {
-    for (var f in _announceStartHandlers) {
-      Timer.run(() => f(tracker));
+  void _fireTrackerStop(TrackerStopEvent event) {
+    var record = _announceRetryTimers.remove(event.source);
+    if (record != null) {
+      record[0].cancel();
     }
+    events.emit(AnnouncePeerEventEvent(event.source, event.peerEvent));
   }
 
-  void _hookTrakcer(Tracker tracker) {
-    tracker.onAnnounceStart(_fireAnnounceStart);
-    tracker.onAnnounceError(_fireAnnounceError);
-    tracker.onAnnounceOver(_fireAnnounceOver);
-    tracker.onPeerEvent(_firePeerEvent);
-    tracker.onDisposed(_fireTrackerDisposed);
-    tracker.onCompleteEvent(_firePeerEvent);
-    tracker.onStopEvent(_firePeerEvent);
+  void _fireTrackerDisposed(TrackerDisposedEvent event) {
+    var record = _announceRetryTimers.remove(event.source);
+    if (record != null) {
+      record[0].cancel();
+    }
+    _trackers.remove(event.source.announceUrl);
+    events.emit(AnnounceTrackerDisposedEvent(event.source, event.reason));
+  }
+
+  void _fireAnnounceStart(TrackerAnnounceStartEvent event) {
+    events.emit(AnnounceTrackerStartEvent(event.source));
+  }
+
+  void _hookTracker(Tracker tracker) {
+    var trackerListener = tracker.createListener();
+    trackerEventListeners[tracker] = trackerListener;
+    trackerListener
+      ..on<TrackerAnnounceStartEvent>(_fireAnnounceStart)
+      ..on<TrackerAnnounceErrorEvent>(_fireAnnounceError)
+      ..on<TrackerAnnounceOverEvent>(_fireAnnounceOver)
+      ..on<TrackerPeerEventEvent>(_firePeerEvent)
+      ..on<TrackerDisposedEvent>(_fireTrackerDisposed)
+      ..on<TrackerCompleteEvent>(_fireTrackerComplete)
+      ..on<TrackerStopEvent>(_fireTrackerStop);
   }
 
   void _unHookTracker(Tracker tracker) {
-    tracker.offAnnounceStart(_fireAnnounceStart);
-    tracker.offAnnounceError(_fireAnnounceError);
-    tracker.offAnnounceOver(_fireAnnounceOver);
-    tracker.offPeerEvent(_firePeerEvent);
-    tracker.offDisposed(_fireTrackerDisposed);
-    tracker.offCompleteEvent(_firePeerEvent);
-    tracker.offStopEvent(_firePeerEvent);
+    var trackerListener = trackerEventListeners.remove(tracker);
+    if (trackerListener != null) {
+      trackerListener.dispose();
+    }
   }
 
   Future<List<PeerEvent?>>? stop([bool force = false]) {

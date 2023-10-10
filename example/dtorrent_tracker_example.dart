@@ -5,6 +5,7 @@ import 'package:dtorrent_common/dtorrent_common.dart';
 
 import 'package:dtorrent_tracker/dtorrent_tracker.dart';
 import 'package:dtorrent_parser/dtorrent_parser.dart';
+import 'package:dtorrent_tracker/src/torrent_announce_events.dart';
 
 void main() async {
   var torrent = await Torrent.parse('example/test.torrent');
@@ -18,27 +19,35 @@ void main() async {
   /// Announce Track:
   try {
     var torrentTracker = TorrentAnnounceTracker(provider, maxRetryTime: 0);
-    torrentTracker.onTrackerDispose((source, reason) {
-      // if (reason != null && source is HttpTracker)
-      log('Tracker disposed  , remain ${torrentTracker.trackersNum} :',
-          error: reason);
-    });
-    torrentTracker.onAnnounceError((source, error) {
-      // log('announce error:', error: error);
-      // source.dispose(error);
-    });
-    torrentTracker.onPeerEvent((source, event) {
-      // print('${source.announceUrl} peer event: $event');
-      if (event == null) return;
-      peerAddress.addAll(event.peers);
-      source.dispose('Complete Announc');
-      print('got ${peerAddress.length} peers');
-    });
+    var trackerListener = torrentTracker.createListener();
+    trackerListener
+      ..on<AnnounceTrackerDisposedEvent>((event) {
+        // if (reason != null && source is HttpTracker)
+        log('Tracker disposed  , remain ${torrentTracker.trackersNum} :',
+            error: event.reason);
+      })
+      ..on<AnnounceErrorEvent>(
+        (event) {
+          // log('announce error:', error: error);
+          // source.dispose(error);
+        },
+      )
+      ..on<AnnouncePeerEventEvent>(
+        (event) {
+          // print('${source.announceUrl} peer event: $event');
+          if (event.event == null) return;
+          peerAddress.addAll(event.event!.peers);
+          event.source.dispose('Complete Announc');
+          print('got ${peerAddress.length} peers');
+        },
+      )
+      ..on<AnnounceOverEvent>(
+        (event) {
+          print('${event.source.announceUrl} announce over: ${event.time}');
+          // source.dispose();
+        },
+      );
 
-    torrentTracker.onAnnounceOver((source, time) {
-      print('${source.announceUrl} announce over: $time');
-      // source.dispose();
-    });
     findPublicTrackers().listen((urls) {
       torrentTracker.runTrackers(urls, torrent.infoHashBuffer);
     });

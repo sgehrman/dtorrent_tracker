@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:dtorrent_tracker/src/tracker/tracker_base.dart';
+import 'package:dtorrent_tracker/src/tracker/tracker_events.dart';
+import 'package:events_emitter2/events_emitter2.dart';
 
 import 'peer_event.dart';
 
@@ -16,7 +18,7 @@ const EVENT_STOPPED = 'stopped';
 /// An abstract class for accessing Announce to obtain data.
 ///
 /// ```
-abstract class Tracker {
+abstract class Tracker with EventsEmittable<TrackerEvent> {
   /// Tracker ID , usually use server host url to be its id.
   final String id;
 
@@ -35,26 +37,6 @@ abstract class Tracker {
 
   /// The interval for looping scrape data, in seconds, defaults to 1 minute
   int announceScrape = 1 * 60;
-
-  final Set<void Function(Tracker source, PeerEvent event)> _peerEventHandlers =
-      {};
-
-  final Set<void Function(Tracker source, PeerEvent? event)>
-      _stopEventHandlers = {};
-
-  final Set<void Function(Tracker source, PeerEvent? event)>
-      _completeEventHandlers = {};
-
-  final Set<void Function(Tracker source, dynamic reason)>
-      _disposeEventHandlers = {};
-
-  final Set<void Function(Tracker source, dynamic error)>
-      _announceErrorHandlers = {};
-
-  final Set<void Function(Tracker source, int intervalTime)>
-      _announceOverHandlers = {};
-
-  final Set<void Function(Tracker source)> _announceStartHandlers = {};
 
   Timer? _announceTimer;
 
@@ -117,16 +99,16 @@ abstract class Tracker {
       _running = false;
       return false;
     }
-    _fireAnnounceStartEvent();
+    events.emit(TrackerAnnounceStartEvent(this));
     PeerEvent? result;
     try {
       result = await announce(event, await _announceOptions);
       if (result != null) {
         result.eventType = event;
-        _firePeerEvent(result);
+        events.emit(TrackerPeerEventEvent(this, result));
       }
     } catch (e) {
-      _fireAnnounceError(e);
+      events.emit(TrackerAnnounceErrorEvent(this, e));
       return false;
     }
     int? interval;
@@ -148,23 +130,18 @@ abstract class Tracker {
     _announceTimer?.cancel();
     _announceTimer =
         Timer(Duration(seconds: interval), () => _intervalAnnounce(event));
-    _fireAnnounceOver(interval);
+
+    events.emit(TrackerAnnounceOverEvent(this, interval));
     return true;
   }
 
   Future dispose([dynamic reason]) async {
     if (_disposed) return;
+    events.dispose();
     _disposed = true;
     _running = false;
     _announceTimer?.cancel();
-    _fireDisposed(reason);
-    _peerEventHandlers.clear();
-    _announceErrorHandlers.clear();
-    _announceOverHandlers.clear();
-    _stopEventHandlers.clear();
-    _completeEventHandlers.clear();
-    _announceStartHandlers.clear();
-    _disposeEventHandlers.clear();
+    events.emit(TrackerDisposedEvent(this, reason));
     await close();
   }
 
@@ -200,14 +177,14 @@ abstract class Tracker {
     if (isDisposed) return null;
     stopIntervalAnnounce();
     if (force) {
-      _fireStopEvent(null);
+      events.emit(TrackerStopEvent(this, null));
       await close();
       return null;
     }
     try {
       var re = await announce(EVENT_STOPPED, await _announceOptions);
       re?.eventType = EVENT_STOPPED;
-      _fireStopEvent(re);
+      events.emit(TrackerStopEvent(this, re));
       await close();
       return re;
     } catch (e) {
@@ -226,7 +203,7 @@ abstract class Tracker {
     try {
       var re = await announce(EVENT_COMPLETED, await _announceOptions);
       re?.eventType = EVENT_COMPLETED;
-      _fireCompleteEvent(re);
+      events.emit(TrackerCompleteEvent(this, re));
       await close();
       return re;
     } catch (e) {
@@ -250,105 +227,6 @@ abstract class Tracker {
   /// the value from the returned object's 'interval'.
   ///
   Future<PeerEvent?> announce(String eventType, Map<String, dynamic> options);
-
-  bool onAnnounceError(void Function(Tracker source, dynamic error) handler) {
-    return _announceErrorHandlers.add(handler);
-  }
-
-  bool offAnnounceError(void Function(Tracker source, dynamic error) handler) {
-    return _announceErrorHandlers.remove(handler);
-  }
-
-  bool onPeerEvent(void Function(Tracker source, PeerEvent event) handler) {
-    return _peerEventHandlers.add(handler);
-  }
-
-  bool offPeerEvent(void Function(Tracker source, PeerEvent) handler) {
-    return _peerEventHandlers.remove(handler);
-  }
-
-  bool onStopEvent(void Function(Tracker source, PeerEvent?) handler) {
-    return _stopEventHandlers.add(handler);
-  }
-
-  bool offStopEvent(void Function(Tracker source, PeerEvent) handler) {
-    return _stopEventHandlers.remove(handler);
-  }
-
-  bool onCompleteEvent(void Function(Tracker source, PeerEvent?) handler) {
-    return _completeEventHandlers.add(handler);
-  }
-
-  bool offCompleteEvent(void Function(Tracker source, PeerEvent) handler) {
-    return _completeEventHandlers.remove(handler);
-  }
-
-  bool onAnnounceStart(void Function(Tracker source) handler) {
-    return _announceStartHandlers.add(handler);
-  }
-
-  bool offAnnounceStart(void Function(Tracker source) handler) {
-    return _announceStartHandlers.remove(handler);
-  }
-
-  bool onAnnounceOver(void Function(Tracker source, int intervalTime) handler) {
-    return _announceOverHandlers.add(handler);
-  }
-
-  bool offAnnounceOver(
-      void Function(Tracker source, int intervalTime) handler) {
-    return _announceOverHandlers.remove(handler);
-  }
-
-  bool onDisposed(void Function(Tracker tracker, dynamic reason) handler) {
-    return _disposeEventHandlers.add(handler);
-  }
-
-  bool offDisposed(void Function(Tracker, dynamic) handler) {
-    return _disposeEventHandlers.remove(handler);
-  }
-
-  void _fireAnnounceStartEvent() {
-    for (var handler in _announceStartHandlers) {
-      Timer.run(() => handler(this));
-    }
-  }
-
-  void _firePeerEvent(PeerEvent event) {
-    for (var handler in _peerEventHandlers) {
-      Timer.run(() => handler(this, event));
-    }
-  }
-
-  void _fireStopEvent(PeerEvent? event) {
-    for (var handler in _stopEventHandlers) {
-      Timer.run(() => handler(this, event));
-    }
-  }
-
-  void _fireCompleteEvent(PeerEvent? event) {
-    for (var handler in _completeEventHandlers) {
-      Timer.run(() => handler(this, event));
-    }
-  }
-
-  void _fireAnnounceError(dynamic error) {
-    for (var handler in _announceErrorHandlers) {
-      Timer.run(() => handler(this, error));
-    }
-  }
-
-  void _fireAnnounceOver(int intervalTime) {
-    for (var handler in _announceOverHandlers) {
-      Timer.run(() => handler(this, intervalTime));
-    }
-  }
-
-  void _fireDisposed([dynamic reason]) {
-    for (var handler in _disposeEventHandlers) {
-      Timer.run(() => handler(this, reason));
-    }
-  }
 
   @override
   bool operator ==(other) {
