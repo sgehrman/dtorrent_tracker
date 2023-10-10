@@ -38,3 +38,6 @@
 
 ## 1.3.15
 - pub.dev fixes
+
+## 1.3.16
+- migrate to events_emitter2
