@@ -41,3 +41,7 @@
 
 ## 1.3.16
 - migrate to events_emitter2
+
+## 1.3.17
+- use the new legal test torrents
+- update deps and sdk constraints
